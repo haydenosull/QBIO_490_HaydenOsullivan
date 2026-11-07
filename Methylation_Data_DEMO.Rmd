@@ -1,0 +1,165 @@
+---
+title: "Intro to Epigenomics"
+author: "Wade Boohar, updated by Joshua Lin and Jeanne Revilla"
+date: "11/03/24"
+updated: "10/25/26"
+---
+
+```{r setup}
+# Change to your directory
+ knitr::opts_knit$set(root.dir = normalizePath("~/490_cluster/week8_epigenomics"))
+```
+
+#Package Download and Data-cleaning
+```{r}
+if (!require("sesameData", quietly = TRUE))
+BiocManager::install("sesameData")
+
+if (!require("sesame", quietly = TRUE))
+BiocManager::install("sesame")
+
+if (!require("limma", quietly = TRUE))
+BiocManager::install("limma")
+```
+
+
+# Load in all necessary packages
+```{r}
+library(TCGAbiolinks)
+library(sesame)
+library(sesameData)
+library(limma)
+library(ggplot2)
+```
+
+# Query, Download, and Prepare the data.
+```{r}
+
+```
+The above data requires a LOT of memory. My recommendation: GDCdownload() and GDCprepare() in separate R sessions.
+R requires a lot of memory for both.
+
+```{r}
+
+```
+
+Use the code below if you are loading in your data (i.e. you downloaded the data and closed the session, but you are back to continue working)
+```{r}
+methylation_clinical <- read.csv('brca_methylation_clinical_data.csv', row.names = 1)
+betas <- read.csv('brca_methylation_betas_data.csv', row.names=1)
+cpg_sites <- read.csv('brca_methylation_cpg_sites_data.csv', row.names = 1)
+```
+
+
+# (1) Naive Differential Methylation
+```{r}
+#masking out NAs
+normal_mask <- methylation_clinical$definition %in% c("Metastatic", "Primary solid Tumor")
+methylation_clinical <- methylation_clinical[normal_mask,]
+betas_clean <- betas[,normal_mask]
+
+#creating our variable of interest & deciding the base group
+methylation_clinical$metastatic_category <- ifelse(methylation_clinical$definition == "Metastatic", "metastatic", "non-metastatic")
+
+#define your comparison and base group
+non_met_mask <- methylation_clinical$metastatic_category == "non-metastatic"
+methylation_clinical$metastatic <- !non_met_mask #old is comparison, young is base
+
+#fitting linear models using a "target value"
+mval <- t(apply(betas_clean, 1, function(x) log2(x/(1-x)))) 
+#mvalue is another statistic for methylation, centered at 0 and ranges from -1 to 1
+#this step will take a few seconds to run
+
+design <- model.matrix(~ metastatic, data = methylation_clinical)
+
+fit <- lmFit(mval, design)
+fit2 <- eBayes(fit)
+```
+
+```{r}
+# Extracting model into dataframe
+dat <- data.frame(foldchange = fit[["coefficients"]][,2], logPvalue =  -log10(p.adjust(fit2[["p.value"]][,2],method='BY')), geneName = cpg_sites$gene)
+dat$threshold <- as.factor(abs(dat$foldchange) < 1)
+
+# Visualization
+cols <- c("TRUE" = "grey", "FALSE" = "blue")
+ggplot(data=dat, aes(x=foldchange, y = logPvalue)) +
+  geom_point(alpha=.2, size=0.6) +
+  scale_colour_manual(values = cols) +
+  geom_vline(xintercept = 1, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = - 1, colour="#990000", linetype="dashed") +
+  geom_hline(yintercept = 2, colour = "#990000", linetype="dashed") +
+  theme(legend.position="none") +
+  xlab("Fold Change") +
+  ylab("-log10 p value") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Saving results to a .csv file
+write.csv(dat, "methylation_results_metastatic.csv")
+
+# Because theres a lot of dots that skew left in the negative plane, this means that theres lower methylation in metastatic samples. Only a few are on the right side, where methylation is hgiger. Theres only 5 metastatic patients so the results may be due to chance.
+```
+
+#(2) Direct comparison of methylation status to transcriptional activity
+...INSERT DESeq2 Stuff here to generate 'results'...
+```{r}
+de_results <- read.csv("~/490_cluster/analysis_data/brca_DESeq_results.csv")
+
+rna_clinical <- read.csv("~/490_cluster/analysis_data/brca_rna_clinical_data.csv", row.names = 1)
+rna_genes <- read.csv("~/490_cluster/analysis_data/brca_rna_gene_data.csv")
+rna_counts <- read.csv("~/490_cluster/analysis_data/brca_rna_count_data.csv", row.names = 1)
+```
+
+
+```{r}
+# Extract genes of interest
+downregulated <- de_results[which(de_results$log2FoldChange < 0 & de_results$padj < 0.05), 'gene_name']
+hypermethylated <- dat[which(dat$foldchange > 1 & dat$logPvalue > 2), 'geneName']
+interest_genes <- intersect(downregulated, hypermethylated)
+```
+
+```{r}
+# Explore your gene of interest
+GENE<-"MYO1C"
+
+gene_counts_mask <- rna_genes$gene_name == GENE
+gene_betas_mask <- cpg_sites$gene == GENE
+
+#What are we doing here?
+rna_clinical_met <- rna_clinical$definition == "Metastatic"
+methylation_clinical_met <- methylation_clinical$definition == "Metastatic"
+
+rna_clinical_nonmet <- rna_clinical$definition == "Primary solid Tumor"
+methylation_clinical_nonmet <- methylation_clinical$definition == "Primary solid Tumor"
+
+#What are we doing here?
+rna_met <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_met])
+methylation_met <- betas[gene_betas_mask, methylation_clinical_met]
+
+rna_nonmet <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_nonmet])
+methylation_nonmet <- betas[gene_betas_mask, methylation_clinical_nonmet]
+```
+
+```{r}
+# Show transcriptional differences
+boxplot(rna_nonmet, rna_met, xlab='Group', ylab='Counts', names=c('non-metastatic', 'metastatic'),
+        col=c("blue","red"))
+
+# In this plot, we see how active the gene "MYO1C" is in non metastatic samples vs matastatic patients. The middle line between the two is pretty close so its not clearly turned down in one catagory or the other. There are many blue dots above the line, which means that there are samples with higher gene activity than most. The red box is small because there are so few patients.
+```
+
+```{r}
+# Show methylation differences at CpG sites in this gene 
+plot(1:dim(methylation_nonmet)[1], apply(methylation_nonmet, 1, mean), col='blue', type='h', lwd=3, ylab='Average Beta', xlab='CpG sites')
+
+lines(1.3:(dim(methylation_met)[1]+0.3), apply(methylation_met, 1, mean), col='red', type='h', lwd=3)
+
+legend("topright",
+       legend=c("Non-metastatic", "Metastatic"),
+       col=c("blue", "red"),
+       lwd=3,
+       cex=0.7)
+
+# This plot compares how methylated each spot on a gene is in a non metastatic patient vs a metastatic patient. Theres lots of overlap so theyre very similar. Theres no clear pattern. Many spots on the middle of the gene show low methylation. 
+```
